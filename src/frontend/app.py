@@ -9,7 +9,10 @@ sys.path.append('.')
 
 from src.ocr.document_reader import read_document
 from src.nlp.extractor import extract_entities
-
+from src.fuzzy.categoriser import categorise
+from src.agents.accounting_agent import run_agent
+from src.generative.document_generator import generate_document
+from src.xai.explainer import explain_decision
 
 # ── Page setup ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -23,7 +26,7 @@ st.set_page_config(
 col_logo, col_title, col_status = st.columns([1, 4, 2])
 with col_title:
     st.title('📊 AI Accounting Platform')
-    st.caption('Powered by AI  |  Subscription Portal  |  University of Essex KTP Demo')
+    st.caption('Powered by AI  |  Subscription Portal  |  University of Essex and Active Software Platform KTP Demo')
 with col_status:
     st.success('✅ Logged in: Smith & Partners Ltd')
 
@@ -36,10 +39,10 @@ with st.sidebar:
     st.header('Platform Modules')
     st.success('✅ OCR Scanner: Active')
     st.success('✅ NLP Extractor: Active')
-    st.warning('⏳ Fuzzy Logic: Week 2')
-    st.warning('⏳ AI Agent: Week 2')
-    st.warning('⏳ GenAI Documents: Week 3')
-    st.warning('⏳ Explainable AI: Week 3')
+    st.warning('✅ Fuzzy Logic: Active')
+    st.warning('✅ AI Agent: Active')
+    st.warning('✅ GenAI Documents: Active')
+    st.warning('✅ Explainable AI: Active')
 
 
 # ── Main upload area ───────────────────────────────────────────────────

@@ -5,14 +5,11 @@
 import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_react_agent, AgentExecutor
+from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools import tool
-from langchain import hub
 from dataclasses import dataclass
 
-
 load_dotenv()  # Reads your .env file and loads OPENAI_API_KEY
-
 
 # ── Define the Agent's tools ──────────────────────────────────────────
 # Each @tool is something the agent can choose to do.
