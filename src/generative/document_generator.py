@@ -7,7 +7,7 @@
 #   ollama pull llama3.1
 
 from langchain_ollama import ChatOllama
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from dataclasses import dataclass
 
 

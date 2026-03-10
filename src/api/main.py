@@ -20,12 +20,18 @@ from src.database.models import (
     init_db, get_db, FinancialEntry, Document,
     GeneratedDocument as GeneratedDocumentModel
 )
-from src.ocr.document_reader        import read_document
-from src.nlp.extractor              import extract_entities
-from src.fuzzy.categoriser          import score_categories, NOMINAL_CODE_MAP, AMBIGUITY_THRESHOLD
-from src.agents.accounting_agent    import make_decision
+from src.ocr.document_reader           import read_document
+from src.nlp.extractor                 import extract_entities
+from src.fuzzy.categoriser             import score_categories, NOMINAL_CODE_MAP
+from src.agents.accounting_agent       import make_decision
 from src.generative.document_generator import generate_document
-from src.xai.explainer              import explain_decision
+
+# XAI is optional — if explainer.py not built yet the rest still works
+try:
+    from src.xai.explainer import explain_decision
+    XAI_AVAILABLE = True
+except ImportError:
+    XAI_AVAILABLE = False
 
 load_dotenv()
 
@@ -60,7 +66,8 @@ def root():
         "status":  "running",
         "app":     "KTP AI Accounting Platform",
         "version": "1.0.0",
-        "modules": ["OCR", "NLP", "Fuzzy", "Agent", "GenAI", "XAI", "Database"]
+        "modules": ["OCR", "NLP", "Fuzzy", "Agent", "GenAI", "XAI", "Database"],
+        "xai_available": XAI_AVAILABLE,
     }
 
 
@@ -71,9 +78,6 @@ def health():
 
 # ══════════════════════════════════════════════════════════════════════════
 # PATHWAY 1 — OCR: Client uploads a source document
-# POST /process/document
-# Accepts: PDF or image file
-# Returns: extracted fields + fuzzy scores + agent decision + double entry
 # ══════════════════════════════════════════════════════════════════════════
 
 @app.post("/process/document")
@@ -84,82 +88,79 @@ async def process_document(
 ):
     """
     OCR Pathway — upload a source document (invoice, bill, contract, receipt).
-    The system reads every field directly from the document.
-    No typing required. No VAT rate assumptions.
+    Reads every field directly from the document. No typing. No VAT assumptions.
     """
-    # ── Step 1: Read file ──────────────────────────────────────────────
+    # Step 1: Read file
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
 
-    # ── Step 2: OCR ───────────────────────────────────────────────────
+    # Step 2: OCR
     ocr_result = read_document(file_bytes, file.filename)
     if not ocr_result.get("text"):
         raise HTTPException(status_code=422, detail="OCR could not extract text from document")
 
     raw_text = ocr_result["text"]
 
-    # ── Step 3: NLP ───────────────────────────────────────────────────
+    # Step 3: NLP
     nlp_result = extract_entities(raw_text, entry_type="ocr")
 
-    # ── Step 4: Fuzzy Logic ───────────────────────────────────────────
+    # Step 4: Fuzzy Logic
     fuzzy_result = score_categories(raw_text, nlp_result.get("category_hint"))
-    top_category  = fuzzy_result["top_category"]
-    confidence    = fuzzy_result["top_score"]
-    is_ambiguous  = fuzzy_result["is_ambiguous"]
-    nominal       = NOMINAL_CODE_MAP.get(top_category, NOMINAL_CODE_MAP["General Overhead"])
+    top_category = fuzzy_result["top_category"]
+    confidence   = fuzzy_result["top_score"]
+    is_ambiguous = fuzzy_result["is_ambiguous"]
+    nominal      = NOMINAL_CODE_MAP.get(top_category, NOMINAL_CODE_MAP["General Overhead"])
 
-    # ── Step 5: AI Agent ──────────────────────────────────────────────
+    # Step 5: AI Agent
     decision = make_decision(
-        vendor        = nlp_result.get("vendor"),
-        amount        = nlp_result.get("gross_amount"),
-        category      = top_category,
-        confidence    = confidence,
-        is_ambiguous  = is_ambiguous,
-        entry_type    = "ocr",
-        vat_rate      = nlp_result.get("vat_rate"),
-        description   = nlp_result.get("description", ""),
+        vendor       = nlp_result.get("vendor"),
+        amount       = nlp_result.get("gross_amount"),
+        category     = top_category,
+        confidence   = confidence,
+        is_ambiguous = is_ambiguous,
+        entry_type   = "ocr",
+        vat_rate     = nlp_result.get("vat_rate"),
+        description  = nlp_result.get("description", ""),
     )
 
-    # ── Step 6: XAI ───────────────────────────────────────────────────
-    try:
-        xai_explanation = explain_decision(
-            vendor=nlp_result.get("vendor", ""),
-            amount=nlp_result.get("gross_amount", 0),
-            category=top_category,
-            confidence=confidence,
-            entry_type="ocr",
-        )
-    except Exception:
-        xai_explanation = f"Category '{top_category}' selected with {confidence:.0%} confidence from OCR source document."
+    # Step 6: XAI
+    xai_explanation = _get_xai(
+        vendor=nlp_result.get("vendor", ""),
+        amount=nlp_result.get("gross_amount", 0),
+        category=top_category,
+        confidence=confidence,
+        entry_type="ocr",
+    )
 
-    # ── Step 7: Save to database ──────────────────────────────────────
+    # Step 7: Save to database
     doc = Document(
-        subscription_id  = subscription_id,
-        original_filename= file.filename,
-        ocr_text         = raw_text,
-        ocr_confidence   = ocr_result.get("confidence", 0),
-        entry_type       = "ocr",
+        subscription_id   = subscription_id,
+        original_filename = file.filename,
+        ocr_text          = raw_text,
+        ocr_confidence    = ocr_result.get("confidence", 0),
+        entry_type        = "ocr",
     )
     db.add(doc)
     db.flush()
 
-    entry = _build_entry(nlp_result, top_category, nominal, confidence,
-                         is_ambiguous, fuzzy_result, decision, xai_explanation,
-                         entry_type="ocr", document_id=doc.id,
-                         subscription_id=subscription_id, raw_text=raw_text)
+    entry = _build_entry(
+        nlp=nlp_result, category=top_category, nominal=nominal,
+        confidence=confidence, is_ambiguous=is_ambiguous,
+        fuzzy_result=fuzzy_result, decision=decision,
+        xai=xai_explanation, entry_type="ocr",
+        document_id=doc.id, subscription_id=subscription_id,
+        raw_text=raw_text,
+    )
     db.add(entry)
     db.commit()
     db.refresh(entry)
 
-    return _build_response(entry, nlp_result, fuzzy_result, decision, xai_explanation, "ocr")
+    return _build_response(entry, fuzzy_result, decision, xai_explanation, "ocr")
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # PATHWAY 2 — Plain English: Accountant types an adjusting entry
-# POST /process/adjusting-entry
-# Accepts: plain English sentence
-# Returns: extracted fields + fuzzy scores + agent decision + double entry
 # ══════════════════════════════════════════════════════════════════════════
 
 class AdjustingEntryRequest(BaseModel):
@@ -175,23 +176,23 @@ def process_adjusting_entry(
     """
     Plain English Pathway — accountant types a sentence for an adjusting entry.
     Used for: accruals, prepayments, depreciation, provisions, corrections.
-    No document required — the accountant's typed sentence is the authority.
+    No document required.
     """
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="No text provided")
 
-    # ── Step 1: NLP (no OCR — text comes directly) ────────────────────
+    # Step 1: NLP directly (no OCR)
     nlp_result = extract_entities(text, entry_type="adjusting")
 
-    # ── Step 2: Fuzzy Logic ───────────────────────────────────────────
+    # Step 2: Fuzzy Logic
     fuzzy_result = score_categories(text, nlp_result.get("category_hint"))
-    top_category  = fuzzy_result["top_category"]
-    confidence    = fuzzy_result["top_score"]
-    is_ambiguous  = fuzzy_result["is_ambiguous"]
-    nominal       = NOMINAL_CODE_MAP.get(top_category, NOMINAL_CODE_MAP["General Overhead"])
+    top_category = fuzzy_result["top_category"]
+    confidence   = fuzzy_result["top_score"]
+    is_ambiguous = fuzzy_result["is_ambiguous"]
+    nominal      = NOMINAL_CODE_MAP.get(top_category, NOMINAL_CODE_MAP["General Overhead"])
 
-    # ── Step 3: AI Agent ──────────────────────────────────────────────
+    # Step 3: AI Agent
     decision = make_decision(
         vendor         = nlp_result.get("vendor"),
         amount         = nlp_result.get("gross_amount") or nlp_result.get("amount"),
@@ -204,41 +205,38 @@ def process_adjusting_entry(
         description    = text,
     )
 
-    # ── Step 4: XAI ───────────────────────────────────────────────────
-    try:
-        xai_explanation = explain_decision(
-            vendor=nlp_result.get("vendor", ""),
-            amount=nlp_result.get("amount", 0),
-            category=top_category,
-            confidence=confidence,
-            entry_type="adjusting",
-        )
-    except Exception:
-        xai_explanation = (
-            f"Adjusting entry '{nlp_result.get('adjusting_type', 'journal')}' — "
-            f"category '{top_category}' selected with {confidence:.0%} confidence from plain English input."
-        )
+    # Step 4: XAI
+    xai_explanation = _get_xai(
+        vendor=nlp_result.get("vendor", ""),
+        amount=nlp_result.get("amount", 0),
+        category=top_category,
+        confidence=confidence,
+        entry_type="adjusting",
+    )
 
-    # ── Step 5: Save to database ──────────────────────────────────────
-    entry = _build_entry(nlp_result, top_category, nominal, confidence,
-                         is_ambiguous, fuzzy_result, decision, xai_explanation,
-                         entry_type="adjusting", document_id=None,
-                         subscription_id=request.subscription_id, raw_text=text)
+    # Step 5: Save to database
+    entry = _build_entry(
+        nlp=nlp_result, category=top_category, nominal=nominal,
+        confidence=confidence, is_ambiguous=is_ambiguous,
+        fuzzy_result=fuzzy_result, decision=decision,
+        xai=xai_explanation, entry_type="adjusting",
+        document_id=None, subscription_id=request.subscription_id,
+        raw_text=text,
+    )
     db.add(entry)
     db.commit()
     db.refresh(entry)
 
-    return _build_response(entry, nlp_result, fuzzy_result, decision, xai_explanation, "adjusting")
+    return _build_response(entry, fuzzy_result, decision, xai_explanation, "adjusting")
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # GENERATE DOCUMENT — GenAI writes a professional letter
-# POST /generate-document
 # ══════════════════════════════════════════════════════════════════════════
 
 class GenerateDocumentRequest(BaseModel):
-    entry_id:   int
-    doc_type:   str = "expense_letter"   # expense_letter / vat_report / audit_summary
+    entry_id: int
+    doc_type: str = "expense_letter"
 
 
 @app.post("/generate-document")
@@ -246,26 +244,29 @@ def generate_accounting_document(
     request: GenerateDocumentRequest,
     db: Session = Depends(get_db)
 ):
-    """
-    GenAI — generates a professional accounting letter or report
-    for a previously processed entry using Ollama llama3.1.
-    """
+    """GenAI — writes a professional letter for a saved entry using Ollama."""
     entry = db.query(FinancialEntry).filter(FinancialEntry.id == request.entry_id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
 
-    doc = generate_document(
-        doc_type   = request.doc_type,
-        vendor     = entry.vendor or "Unknown",
-        amount     = entry.gross_amount or 0.0,
-        date       = entry.transaction_date or "Not specified",
-        category   = entry.category or "Unclassified",
-        confidence = entry.confidence_score or 0.0,
-        decision   = entry.ai_decision or "Processed by AI",
-        explanation= entry.xai_explanation or "",
+    # Format date safely
+    date_str = (
+        entry.transaction_date.strftime("%d %B %Y")
+        if isinstance(entry.transaction_date, datetime)
+        else str(entry.transaction_date or "Not specified")
     )
 
-    # Save generated document
+    doc = generate_document(
+        doc_type    = request.doc_type,
+        vendor      = entry.vendor or "Unknown",
+        amount      = entry.gross_amount or 0.0,
+        date        = date_str,
+        category    = entry.category or "Unclassified",
+        confidence  = entry.confidence_score or 0.0,
+        decision    = entry.ai_decision or "Processed by AI",
+        explanation = entry.xai_explanation or "",
+    )
+
     saved = GeneratedDocumentModel(
         entry_id   = entry.id,
         doc_type   = request.doc_type,
@@ -285,20 +286,15 @@ def generate_accounting_document(
 
 # ══════════════════════════════════════════════════════════════════════════
 # REVIEW — Accountant approves or rejects a draft entry
-# PATCH /entries/{entry_id}/review
 # ══════════════════════════════════════════════════════════════════════════
 
 class ReviewRequest(BaseModel):
-    action:      str    # "approve" or "reject"
-    reviewed_by: str    # accountant name or email
+    action:      str
+    reviewed_by: str
 
 
 @app.patch("/entries/{entry_id}/review")
-def review_entry(
-    entry_id: int,
-    request:  ReviewRequest,
-    db:       Session = Depends(get_db)
-):
+def review_entry(entry_id: int, request: ReviewRequest, db: Session = Depends(get_db)):
     """Accountant approves or rejects a draft entry."""
     entry = db.query(FinancialEntry).filter(FinancialEntry.id == entry_id).first()
     if not entry:
@@ -320,8 +316,7 @@ def review_entry(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# GET ENTRIES — list all financial entries
-# GET /entries
+# GET ENTRIES
 # ══════════════════════════════════════════════════════════════════════════
 
 @app.get("/entries")
@@ -338,7 +333,6 @@ def get_entries(
     if entry_type:
         query = query.filter(FinancialEntry.entry_type == entry_type)
     entries = query.order_by(FinancialEntry.created_at.desc()).limit(limit).all()
-
     return [_entry_to_dict(e) for e in entries]
 
 
@@ -355,14 +349,48 @@ def get_entry(entry_id: int, db: Session = Depends(get_db)):
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════
 
+def _get_xai(vendor, amount, category, confidence, entry_type) -> str:
+    """Call XAI module if available, otherwise return a plain English fallback."""
+    if XAI_AVAILABLE:
+        try:
+            return explain_decision(
+                vendor=vendor, amount=amount, category=category,
+                confidence=confidence, entry_type=entry_type,
+            )
+        except Exception:
+            pass
+    # Fallback plain English explanation — always works even without SHAP
+    pathway = "OCR source document" if entry_type == "ocr" else "plain English adjusting entry"
+    return (
+        f"Category '{category}' assigned with {confidence:.0%} confidence "
+        f"from {pathway}. Vendor: '{vendor or 'Unknown'}'. "
+        f"Amount: £{amount or 0:.2f}. Entry processed by AI Agent and stored as draft."
+    )
+
+
+def _parse_date(date_str) -> datetime | None:
+    """Safely parse a date string to datetime. Returns None if unparseable."""
+    if not date_str:
+        return None
+    if isinstance(date_str, datetime):
+        return date_str
+    formats = ["%d %B %Y", "%d/%m/%Y", "%Y-%m-%d", "%B %Y", "%b %Y"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _build_entry(nlp, category, nominal, confidence, is_ambiguous,
                  fuzzy_result, decision, xai, entry_type,
                  document_id, subscription_id, raw_text) -> FinancialEntry:
     """Build a FinancialEntry ORM object from pipeline results."""
-    amount  = nlp.get("gross_amount") or nlp.get("amount") or 0.0
-    net     = nlp.get("net_amount")   or amount
-    vat_amt = nlp.get("vat_amount")   or 0.0
-    vat_rate= nlp.get("vat_rate")     or 0.0
+    amount   = nlp.get("gross_amount") or nlp.get("amount") or 0.0
+    net      = nlp.get("net_amount")   or amount
+    vat_amt  = nlp.get("vat_amount")   or 0.0
+    vat_rate = nlp.get("vat_rate")     or 0.0
 
     return FinancialEntry(
         document_id       = document_id,
@@ -381,21 +409,22 @@ def _build_entry(nlp, category, nominal, confidence, is_ambiguous,
         vendor            = nlp.get("vendor"),
         vendor_vat_number = nlp.get("vendor_vat_number"),
         reference         = nlp.get("reference"),
-        description       = nlp.get("description", "")[:500],
-        raw_text          = raw_text[:2000],
+        description       = (nlp.get("description") or "")[:500],
+        raw_text          = (raw_text or "")[:2000],
         category          = category,
         confidence_score  = confidence,
         fuzzy_scores      = json.dumps(fuzzy_result.get("all_scores", {})),
-        ai_decision       = decision.output[:500] if decision else "Pending",
+        ai_decision       = (decision.output if decision else "Pending")[:500],
         xai_explanation   = xai,
         is_ambiguous      = is_ambiguous,
         status            = "draft",
-        transaction_date  = nlp.get("date"),
+        transaction_date  = _parse_date(nlp.get("date")),   # safely converted to DateTime
+        posted_date       = datetime.utcnow(),
         currency          = "GBP",
     )
 
 
-def _build_response(entry, nlp, fuzzy, decision, xai, entry_type) -> dict:
+def _build_response(entry, fuzzy, decision, xai, entry_type) -> dict:
     """Build the API response dict."""
     amount = entry.gross_amount or 0.0
     return {
@@ -403,8 +432,6 @@ def _build_response(entry, nlp, fuzzy, decision, xai, entry_type) -> dict:
         "transaction_key":  entry.transaction_key,
         "entry_type":       entry_type,
         "pathway":          "OCR — Source Document" if entry_type == "ocr" else "Plain English — Adjusting Entry",
-
-        # Extracted fields
         "vendor":           entry.vendor,
         "gross_amount":     entry.gross_amount,
         "net_amount":       entry.net_amount,
@@ -412,28 +439,22 @@ def _build_response(entry, nlp, fuzzy, decision, xai, entry_type) -> dict:
         "vat_rate":         f"{entry.vat_rate:.0%}" if entry.vat_rate else "0%",
         "vat_code":         entry.vat_code,
         "accounting_period":entry.accounting_period,
-        "transaction_date": entry.transaction_date,
-
-        # Classification
+        "transaction_date": entry.transaction_date.isoformat() if entry.transaction_date else None,
         "category":         entry.category,
         "nominal_code":     entry.nominal_code,
         "nominal_name":     entry.nominal_name,
-        "confidence":       f"{entry.confidence_score:.0%}",
+        "confidence":       f"{entry.confidence_score:.0%}" if entry.confidence_score else "0%",
         "is_ambiguous":     entry.is_ambiguous,
         "fuzzy_scores":     fuzzy.get("all_scores", {}),
-
-        # Double entry
         "double_entry": {
-            "debit_expense":  {"account": f"{entry.nominal_name} {entry.nominal_code}", "amount": entry.net_amount},
-            "debit_vat":      {"account": "VAT Control 2200",  "amount": entry.vat_amount},
-            "credit_bank":    {"account": "Bank Current 1200", "amount": amount},
-            "balanced":       round((entry.net_amount or 0) + (entry.vat_amount or 0), 2) == round(amount, 2),
+            "debit_expense": {"account": f"{entry.nominal_name} {entry.nominal_code}", "amount": entry.net_amount},
+            "debit_vat":     {"account": "VAT Control 2200",  "amount": entry.vat_amount},
+            "credit_bank":   {"account": "Bank Current 1200", "amount": amount},
+            "balanced":      round((entry.net_amount or 0) + (entry.vat_amount or 0), 2) == round(amount, 2),
         },
-
-        # AI decisions
-        "agent_decision":   decision.output if decision else "Pending",
-        "xai_explanation":  xai,
-        "status":           entry.status,
+        "agent_decision":  decision.output if decision else "Pending",
+        "xai_explanation": xai,
+        "status":          entry.status,
     }
 
 
