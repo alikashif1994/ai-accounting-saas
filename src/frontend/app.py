@@ -15,6 +15,16 @@ st.set_page_config(
 
 API_URL = "http://127.0.0.1:8000"
 
+# ── Session state init ────────────────────────────────────────────────
+if "ocr_result" not in st.session_state:
+    st.session_state.ocr_result = None
+if "adj_result" not in st.session_state:
+    st.session_state.adj_result = None
+if "ocr_letter" not in st.session_state:
+    st.session_state.ocr_letter = None
+if "adj_letter" not in st.session_state:
+    st.session_state.adj_letter = None
+
 # ── Header ────────────────────────────────────────────────────────────
 col_title, col_status = st.columns([4, 2])
 with col_title:
@@ -75,7 +85,8 @@ if page == "📤 Process Document (OCR)":
                 data  = {"subscription_id": 1}
                 try:
                     response = requests.post(f"{API_URL}/process/document", files=files, data=data, timeout=60)
-                    result   = response.json()
+                    st.session_state.ocr_result = response.json()
+                    st.session_state.ocr_letter = None
                 except Exception as e:
                     st.error(f"API error: {e}")
                     st.stop()
@@ -83,8 +94,11 @@ if page == "📤 Process Document (OCR)":
             if response.status_code == 200:
                 st.success("✅ Document processed successfully")
             else:
-                st.error(f"Error: {result.get('detail', 'Unknown error')}")
+                st.error(f"Error: {st.session_state.ocr_result.get('detail', 'Unknown error')}")
                 st.stop()
+
+    if st.session_state.ocr_result:
+        result = st.session_state.ocr_result
 
         st.subheader("Extracted Financial Data")
         col1, col2, col3, col4 = st.columns(4)
@@ -94,10 +108,10 @@ if page == "📤 Process Document (OCR)":
         col4.metric("VAT Code",     result.get("vat_code") or "T9")
 
         col5, col6, col7, col8 = st.columns(4)
-        col5.metric("Vendor",         result.get("vendor")            or "Not found")
-        col6.metric("Category",       result.get("category")          or "Unclassified")
-        col7.metric("Nominal Code",   result.get("nominal_code")      or "—")
-        col8.metric("Period",         result.get("accounting_period") or "—")
+        col5.metric("Vendor",       result.get("vendor")            or "Not found")
+        col6.metric("Category",     result.get("category")          or "Unclassified")
+        col7.metric("Nominal Code", result.get("nominal_code")      or "—")
+        col8.metric("Period",       result.get("accounting_period") or "—")
 
         conf = result.get("confidence", "0%")
         conf_float = float(conf.replace("%", "")) / 100 if isinstance(conf, str) else conf
@@ -127,18 +141,20 @@ if page == "📤 Process Document (OCR)":
         st.write(result.get("xai_explanation", "—"))
 
         st.subheader("Generate Professional Letter")
-        doc_type = st.selectbox("Document type:", ["expense_letter", "vat_report", "audit_summary"])
-        if st.button("Generate Document"):
+        doc_type = st.selectbox("Document type:", ["expense_letter", "vat_report", "audit_summary"], key="ocr_doc_type")
+        if st.button("Generate Document", key="ocr_gen_btn"):
             with st.spinner("Ollama is writing the letter..."):
                 try:
                     gen_response = requests.post(f"{API_URL}/generate-document", json={
                         "entry_id": result.get("entry_id"),
                         "doc_type": doc_type
                     }, timeout=120)
-                    gen_result = gen_response.json()
-                    st.text_area("Generated Document:", value=gen_result.get("content", ""), height=300)
+                    st.session_state.ocr_letter = gen_response.json().get("content", "")
                 except Exception as e:
                     st.error(f"Generation error: {e}")
+
+        if st.session_state.ocr_letter:
+            st.text_area("Generated Document:", value=st.session_state.ocr_letter, height=300)
 
         with st.expander("View full API response"):
             st.json(result)
@@ -172,16 +188,19 @@ elif page == "✏️ Adjusting Entry":
                     "text": text,
                     "subscription_id": 1
                 }, timeout=60)
-                result = response.json()
+                st.session_state.adj_result = response.json()
+                st.session_state.adj_letter = None
             except Exception as e:
                 st.error(f"API error: {e}")
                 st.stop()
 
-        if response.status_code == 200:
-            st.success("✅ Adjusting entry processed successfully")
-        else:
-            st.error(f"Error: {result.get('detail', 'Unknown error')}")
+        if response.status_code != 200:
+            st.error(f"Error: {st.session_state.adj_result.get('detail', 'Unknown error')}")
             st.stop()
+
+    if st.session_state.adj_result:
+        result = st.session_state.adj_result
+        st.success("✅ Adjusting entry processed successfully")
 
         st.subheader("Extracted Data")
         col1, col2, col3, col4 = st.columns(4)
@@ -215,6 +234,22 @@ elif page == "✏️ Adjusting Entry":
 
         st.subheader("Explainable AI")
         st.write(result.get("xai_explanation", "—"))
+
+        st.subheader("Generate Professional Letter")
+        doc_type = st.selectbox("Document type:", ["expense_letter", "vat_report", "audit_summary"], key="adj_doc_type")
+        if st.button("Generate Document", key="adj_gen_btn"):
+            with st.spinner("Ollama is writing the letter..."):
+                try:
+                    gen_response = requests.post(f"{API_URL}/generate-document", json={
+                        "entry_id": result.get("entry_id"),
+                        "doc_type": doc_type
+                    }, timeout=120)
+                    st.session_state.adj_letter = gen_response.json().get("content", "")
+                except Exception as e:
+                    st.error(f"Generation error: {e}")
+
+        if st.session_state.adj_letter:
+            st.text_area("Generated Document:", value=st.session_state.adj_letter, height=300)
 
         with st.expander("View full API response"):
             st.json(result)
