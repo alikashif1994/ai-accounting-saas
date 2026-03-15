@@ -1,70 +1,120 @@
 # src/generative/document_generator.py
 # Generates professional accounting documents using Ollama (free, local)
-# Replaces GPT-4o-mini with llama3.1 — same output quality, zero cost
+# Replaces GPT-4o-mini with llama3.2:1b — lightweight model, zero cost
 #
 # Setup (one time only):
 #   ollama serve &
-#   ollama pull llama3.1
+#   ollama pull llama3.2:1b
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from dataclasses import dataclass
+from datetime import datetime
 
 
 # ── LLM — Ollama running locally ──────────────────────────────────────────
-# temperature=0.3 → consistent professional tone (matches original GPT setting)
-# Change model to "phi3" if your laptop has less than 8GB RAM
-llm = ChatOllama(model="llama3.1", temperature=0.3)
+llm = ChatOllama(model="llama3.2:1b", temperature=0.3)
 
 
 @dataclass
 class GeneratedDocument:
-    doc_type:    str    # 'expense_letter', 'vat_report', 'audit_summary'
-    content:     str    # The full generated text
-    model_used:  str    # Which model was used
-    prompt_used: str    # The prompt (stored for audit purposes)
+    doc_type:    str
+    content:     str
+    model_used:  str
+    prompt_used: str
 
 
-SYSTEM_PROMPT = """You are a professional accounting assistant for a UK accounting firm.
-You write clear, formal, compliant accounting correspondence and reports.
-Always include: relevant amounts with £ symbol, dates in DD Month YYYY format,
-proper accounting terminology, and HMRC reference where relevant.
-Keep letters concise but complete. Never include information not provided to you.
+def get_today():
+    return datetime.now().strftime("%d %B %Y")
+
+
+SYSTEM_PROMPT = f"""You are a professional accounting assistant at Kashif & Partners Ltd,
+a UK chartered accounting firm.
+
+Firm details to use in ALL documents — write them exactly as shown, no square brackets:
+Kashif & Partners Ltd
+1A13 The Templar Drive
+Nuneaton
+CV10 U47
+Phone: 01245 123456
+Email: accounts@kashifandpartners.co.uk
+
+Today's date is {get_today()}. Use this as both the letter date and posting date.
+
+Rules you must always follow:
+- Never use square brackets anywhere in the letter
+- Never use placeholder text like [Address] or [Date]
+- Always open letters with: Dear Sir/Madam
+- Always sign off as: Yours faithfully, Kashif Ahmed, Senior Accountant, Kashif & Partners Ltd
+- Write amounts with the £ symbol
+- Write dates in DD Month YYYY format
+- Use formal professional UK accounting language
 """
 
 
 DOCUMENT_TEMPLATES = {
     "expense_letter": """
-Write a formal accounting letter to confirm and document the following business expense.
-Include: confirmation of recording, the category assigned, VAT status, and any action required.
+Write a formal accounting letter from Kashif & Partners Ltd confirming and documenting
+the following business expense for the client file.
+
+Include in this order:
+1. Firm name and address (no brackets)
+2. Today's date: {today}
+3. Dear Sir/Madam
+4. Confirmation of the expense being recorded
+5. Category, nominal code, VAT status
+6. Any action required
+7. Yours faithfully sign off
+
 Vendor: {vendor}  |  Amount: £{amount:.2f}  |  Date: {date}
-Category: {category}  |  Confidence: {confidence:.0%}  |  Agent Decision: {decision}
+Category: {category}  |  Nominal Code: {nominal_code}  |  Confidence: {confidence:.0%}
+Agent Decision: {decision}
 """,
     "vat_report": """
-Write a concise VAT eligibility report for the following business purchase.
-Include: whether VAT is reclaimable, what evidence is required, and next steps.
+Write a formal VAT eligibility report from Kashif & Partners Ltd for the following purchase.
+
+Include in this order:
+1. Firm name and address (no brackets)
+2. Today's date: {today}
+3. Dear Sir/Madam
+4. Whether VAT is reclaimable and the applicable UK VAT code
+5. Evidence required
+6. Next steps
+7. Yours faithfully sign off
+
 Vendor: {vendor}  |  Amount: £{amount:.2f}  |  Category: {category}
+Nominal Code: {nominal_code}  |  Date: {date}
 """,
     "audit_summary": """
-Write a formal audit trail summary for this AI-processed financial entry.
-Include: what data was extracted, how confident the AI was, what decision was made, and why.
-This summary will be stored for HMRC compliance purposes.
+Write a formal HMRC audit trail summary from Kashif & Partners Ltd for this AI-processed entry.
+
+Include in this order:
+1. Firm name and address (no brackets)
+2. Today's date: {today}
+3. Dear Sir/Madam
+4. What data was extracted by the AI
+5. Confidence level and decision made
+6. XAI explanation
+7. HMRC compliance statement
+8. Yours faithfully sign off
+
 Vendor: {vendor}  |  Amount: £{amount:.2f}  |  Category: {category}
-Confidence: {confidence:.0%}  |  Decision: {decision}
-XAI Explanation: {explanation}
+Nominal Code: {nominal_code}  |  Confidence: {confidence:.0%}
+Decision: {decision}  |  XAI Explanation: {explanation}
 """,
 }
 
 
 def generate_document(
-    doc_type:    str,
-    vendor:      str,
-    amount:      float,
-    date:        str,
-    category:    str,
-    confidence:  float,
-    decision:    str = "Categorised by AI",
-    explanation: str = "",
+    doc_type:     str,
+    vendor:       str,
+    amount:       float,
+    date:         str,
+    category:     str,
+    confidence:   float,
+    decision:     str = "Categorised by AI",
+    explanation:  str = "",
+    nominal_code: str = "",
 ) -> GeneratedDocument:
     """
     Main function: generate a professional accounting document using Ollama.
@@ -79,14 +129,15 @@ def generate_document(
     user_prompt = template.format(
         vendor=vendor         or "Unknown",
         amount=amount         or 0.0,
-        date=date             or "Not specified",
+        date=date             or get_today(),
         category=category     or "Unclassified",
         confidence=confidence or 0.0,
         decision=decision,
         explanation=explanation,
+        nominal_code=nominal_code or "7600",
+        today=get_today(),
     )
 
-    # ── Call Ollama via LangChain messages ────────────────────────────
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=user_prompt),
@@ -98,6 +149,6 @@ def generate_document(
     return GeneratedDocument(
         doc_type=doc_type,
         content=content,
-        model_used="llama3.1",
+        model_used="llama3.2:1b",
         prompt_used=user_prompt,
     )
